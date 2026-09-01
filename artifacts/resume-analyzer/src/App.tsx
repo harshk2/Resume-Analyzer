@@ -117,9 +117,7 @@ function decodePdfLiteral(value: string) {
     .replace(/\\([0-7]{1,3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
 }
 
-async function extractPdfText(file: File) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const raw = new TextDecoder('latin1').decode(bytes);
+function extractPdfOperators(raw: string) {
   const pieces: string[] = [];
   const literalPattern = /\(((?:\\.|[^\\)])*)\)\s*T[Jj]/g;
   const arrayPattern = /\[((?:\\.|[^\]])*)\]\s*TJ/g;
@@ -133,6 +131,51 @@ async function extractPdfText(file: File) {
   while ((match = hexPattern.exec(raw))) {
     const hex = match[1].length % 2 ? `${match[1]}0` : match[1];
     pieces.push((hex.match(/.{2}/g) ?? []).map((pair) => String.fromCharCode(parseInt(pair, 16))).join(''));
+  }
+  return pieces;
+}
+
+async function inflatePdfStream(data: Uint8Array) {
+  for (const format of ['deflate', 'deflate-raw'] as const) {
+    try {
+      const stream = new Blob([data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer]).stream().pipeThrough(new DecompressionStream(format));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch {
+      // PDF producers vary between zlib-wrapped and raw deflate streams.
+    }
+  }
+  return new Uint8Array();
+}
+
+async function extractPdfText(file: File) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const raw = new TextDecoder('latin1').decode(bytes);
+  const pieces = extractPdfOperators(raw);
+  const marker = new TextEncoder().encode('stream');
+  const endMarker = new TextEncoder().encode('endstream');
+  const findBytes = (source: Uint8Array, needle: Uint8Array, from: number) => {
+    outer: for (let index = from; index <= source.length - needle.length; index += 1) {
+      for (let offset = 0; offset < needle.length; offset += 1) {
+        if (source[index + offset] !== needle[offset]) continue outer;
+      }
+      return index;
+    }
+    return -1;
+  };
+  let cursor = 0;
+  while (true) {
+    const streamStart = findBytes(bytes, marker, cursor);
+    if (streamStart < 0) break;
+    const streamEnd = findBytes(bytes, endMarker, streamStart + marker.length);
+    if (streamEnd < 0) break;
+    const dictionary = raw.slice(Math.max(0, streamStart - 240), streamStart);
+    if (/\/FlateDecode\b/.test(dictionary)) {
+      let dataStart = streamStart + marker.length;
+      while (dataStart < streamEnd && (bytes[dataStart] === 0x0a || bytes[dataStart] === 0x0d || bytes[dataStart] === 0x20 || bytes[dataStart] === 0x09)) dataStart += 1;
+      const inflated = await inflatePdfStream(bytes.slice(dataStart, streamEnd));
+      if (inflated.length) pieces.push(...extractPdfOperators(new TextDecoder('latin1').decode(inflated)));
+    }
+    cursor = streamEnd + endMarker.length;
   }
   return cleanText(pieces.join(' '));
 }
@@ -176,8 +219,17 @@ async function extractDocxText(file: File) {
   return '';
 }
 
-async function extractResumeText(file: File) {
+function getFileType(file: File) {
   const extension = file.name.split('.').pop()?.toLowerCase();
+  if (['txt', 'pdf', 'docx', 'doc'].includes(extension ?? '')) return extension;
+  if (file.type === 'application/pdf') return 'pdf';
+  if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+  if (file.type.startsWith('text/')) return 'txt';
+  return '';
+}
+
+async function extractResumeText(file: File) {
+  const extension = getFileType(file);
   if (extension === 'txt') return cleanText(await file.text());
   if (extension === 'pdf') return extractPdfText(file);
   if (extension === 'docx') return extractDocxText(file);
@@ -848,9 +900,8 @@ function Home() {
   }, []);
 
   const handleFile = (file: File) => {
-    const extension = file.name.split('.').pop()?.toLowerCase();
-    if (!['pdf', 'doc', 'docx', 'txt'].includes(extension ?? '')) {
-      setErrorMessage('Please choose a PDF, DOCX, DOC, or TXT resume file.');
+    if (!getFileType(file)) {
+      setErrorMessage('That file type is not supported. Choose a PDF, DOCX, DOC, or TXT resume file.');
       setStage('error');
       return;
     }
