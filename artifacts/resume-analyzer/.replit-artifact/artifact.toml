@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Resume Analyzer"
+description = "An evidence-based resume analyzer for early-career software, AI, machine learning, MLOps, and Python backend roles. Upload a resume, optionally add a target role and job description, and receive a grounded score with ATS-readiness checks, parser-risk flags, and prioritized improvements."
+version = "1.0.0"
+id = "artifacts/resume-analyzer"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18646
+
+[services.development]
+run = "pnpm --filter @workspace/resume-analyzer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/resume-analyzer", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/resume-analyzer/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18646"
+BASE_PATH = "/"

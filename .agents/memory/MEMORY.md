@@ -1,0 +1,1 @@
+- [Resume analysis principles](resume-analysis-principles.md) — keep scoring directional, evidence-backed, and explicit about what it cannot guarantee.
